@@ -91,7 +91,6 @@ COMMAND_INFO = {
     55: ("APP_CMD", 1),
     56: ("GEN_CMD", 1),
     # Security Protocols (class 1None)
-    53: ("PROTOCOL_RD", 1),
     54: ("PROTOCOL_WR", 1),
     # Command Queues (class 11)
     44: ("QUEUED_TASK_PARAMS", 1),
@@ -99,6 +98,10 @@ COMMAND_INFO = {
     46: ("EXECUTE_READ_TASK", 1),
     47: ("EXECUTE_WRITE_TASK", 1),
     48: ("CMDQ_TASK_MGMT", 1),
+    
+    # SDIO
+    52: ("", 5),
+    53: ("", 5)
 }
 
 
@@ -135,6 +138,58 @@ def value_from_bits(bits):
             value += 1
     return value
 
+def interpret_cmd53(bits):
+    rw_flag = bits[8]
+    func_num = value_from_bits(bits[9:12])
+    block_mode = bits[12]
+    op_code = bits[13]
+    address = value_from_bits(bits[14:31])
+    byte_block_count = value_from_bits(bits[31:40])
+    
+    info = " F%u" % func_num
+    
+    if rw_flag:
+        info += " W"
+    else:
+        info += " R"
+    
+    info += " 0x%05x" % address
+    
+    if block_mode:
+        info += " BLK"
+    else:
+        info += " BYTE"
+    
+    info += " 0x%03x" % byte_block_count
+    info += " (%d)" % byte_block_count
+    
+    if op_code:
+        info += " INC"
+    else:
+        info += " FIXED"
+    
+    return info
+
+def interpret_cmd52(bits):
+    rw_flag = bits[8]
+    func_num = value_from_bits(bits[9:12])
+    raw_flag = bits[12]
+    address = value_from_bits(bits[14:31])
+    data = value_from_bits(bits[32:40])
+    
+    info = " F%u" % func_num
+    
+    if rw_flag:
+        info += " W 0x%02x =>" % data
+    else:
+        info += " R"
+    
+    info += " 0x%05x" % address
+    
+    if raw_flag:
+        info += " RAW"
+    
+    return info
 
 def interpret_command(bits):
     """Return a string description from the command bits."""
@@ -146,13 +201,21 @@ def interpret_command(bits):
     argument = value_from_bits(bits[8:40])
     crc7 = value_from_bits(bits[40:47])
     end_bit = value_from_bits(bits[47:48])
+    
     if start_bit or not transmission_bit or not end_bit:
         okay = False
-    if command_index in COMMAND_INFO:
+    if command_index in COMMAND_INFO and get_command_name(command_index):
         info = get_command_name(command_index) + " (CMD%d)" % command_index
     else:
         info = "CMD%d" % command_index
-    info += ", arg:%d" % argument
+    
+    if command_index == 53:
+        info += interpret_cmd53(bits)
+    elif command_index == 52:
+        info += interpret_cmd52(bits)
+    else:
+         info += " arg: 0x%08x" % argument
+    
     if not okay:
         info += ", ERROR"
     return info
@@ -245,6 +308,45 @@ def interpret_response3(bits):
     info = "R3, %s" % ("READY" if ocr_register[0] else "BUSY")
     return info
 
+def interpret_response5(bits):
+    """Return a string description from the response 5 bits."""
+    assert len(bits) == 48
+    okay = True
+    start_bit = bits[0]
+    transmission_bit = bits[1]
+    command_index = value_from_bits(bits[2:8])
+    flags = bits[24:32]
+    io_state = value_from_bits(flags[2:4])
+    data = value_from_bits(bits[32:40])
+    
+    if command_index != 52 and command_index != 53:
+        info = "INVALID"
+        okay = False
+        return info
+    
+    info = "R5 FLG 0x%02x" % value_from_bits(flags);
+    
+    if flags[0]:
+        info += " CRC_ERR"
+    if flags[1]:
+        info += " ILLEGAL_CMD"
+    if flags[4]:
+        info += " ERROR"
+    if flags[6]:
+        info += " INVALID_FUN"
+    if flags[7]:
+        info += " OUT_OF_RANGE"
+    
+    if io_state == 0:
+        info += " IO DIS"
+    elif io_state == 1:
+        info += " IO CMD"
+    elif io_state == 2:
+        info += " IO TRN"
+    
+    info += " DAT 0x%02x" % data
+    
+    return info
 
 class SdioState:
     def __init__(self):
@@ -330,6 +432,8 @@ class SdioState:
                 info = interpret_response2(bits)
             elif this_response_type == 3:
                 info = interpret_response3(bits)
+            elif this_response_type == 5:
+                info = interpret_response5(bits)
             else:
                 print("Unknown response type")
                 info = "R%s" % this_response_type
